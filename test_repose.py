@@ -213,7 +213,7 @@ def make_config(case_params, global_damping=100.0, device="cuda:0"):
         dt=DT,
         gravity=(0.0, 0.0, -G),
         max_contacts_per_particle=32,
-        hash_grid_dim=64,
+        # hash_grid_dim auto-computed from particle count and radius
     )
 
 

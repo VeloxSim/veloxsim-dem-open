@@ -53,7 +53,7 @@ for name, stl_file in stl_name_map.items():
 
 # --- Subsample frames + particles ---
 MAX_ANIM_FRAMES = 200
-PARTICLE_SUBSAMPLE = 1  # show all particles
+PARTICLE_SUBSAMPLE = max(1, MAX_PARTICLES // 30000)  # cap at ~30k particles per frame
 
 step = max(1, len(frames) // MAX_ANIM_FRAMES)
 anim_frames = []
