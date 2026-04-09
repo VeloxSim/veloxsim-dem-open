@@ -750,10 +750,11 @@ class SimConfig:
     friction_dynamic: float = 0.4        # mu_d — Coulomb kinetic friction coefficient
     friction_rolling: float = 0.01       # mu_r — Type C EPSD rolling resistance coefficient
     cohesion_energy: float = 0.0         # J/m^2 (0 = no cohesion)
-    dt: float = 1.0e-5                   # seconds
+    dt: Optional[float] = None           # seconds (None = auto from Rayleigh timestep)
+    dt_safety_factor: float = 0.2        # fraction of Rayleigh timestep (used when dt=None)
     gravity: tuple = (0.0, 0.0, -9.81)
     max_contacts_per_particle: int = 32
-    hash_grid_dim: int = 128
+    hash_grid_dim: Optional[int] = None  # hash grid resolution (None = auto from particle count)
     global_damping: float = 0.0          # 1/s viscous drag coeff (F=-d*m*v)
     device: str = "cuda:0"
 
@@ -795,6 +796,21 @@ class Simulation:
             self.beta = 1.0  # perfectly inelastic
 
         self.cohesion_pulloff = 1.5 * math.pi * config.cohesion_energy * self.R_eff
+
+        # --- Rayleigh timestep ---
+        G_shear = E / (2.0 * (1.0 + nu))  # full shear modulus
+        self.rayleigh_dt = (
+            math.pi * R * math.sqrt(rho / G_shear)
+            / (0.1631 * nu + 0.8766)
+        )
+        if config.dt is None:
+            config.dt = config.dt_safety_factor * self.rayleigh_dt
+
+        # --- Auto hash grid sizing ---
+        self.cell_size = 2.0 * R * 2.1  # slightly larger than particle diameter
+        if config.hash_grid_dim is None:
+            domain_span = (config.num_particles / 0.4) ** (1.0 / 3.0) * 2.0 * R * 2.2
+            config.hash_grid_dim = max(32, min(512, int(domain_span / self.cell_size) + 1))
 
         # --- Warp structs ---
         self.mat_params = MaterialParams()
@@ -844,7 +860,6 @@ class Simulation:
         # Hash grid for broad-phase
         dim = config.hash_grid_dim
         self.hash_grid = wp.HashGrid(dim, dim, dim, device=self.device)
-        self.cell_size = 2.0 * R * 2.1  # slightly larger than particle diameter
 
         # Mesh list: each entry is (wp.Mesh, surface_velocity_tuple)
         self.meshes: list[tuple[wp.Mesh, tuple[float, float, float]]] = []

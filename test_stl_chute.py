@@ -185,7 +185,7 @@ config = SimConfig(
     dt=DT,
     gravity=(0.0, 0.0, -G),
     max_contacts_per_particle=32,
-    hash_grid_dim=128,
+    # hash_grid_dim auto-computed from particle count and radius
     global_damping=1.0,
     device=DEVICE,
 )
