@@ -2,7 +2,7 @@
 
 GPU-accelerated Discrete Element Method (DEM) simulation engine built on [NVIDIA Warp](https://github.com/NVIDIA/warp).
 
-Built by VeloxSim Tech Pty Ltd and Sam Wong.
+Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 
 ## Features
 
