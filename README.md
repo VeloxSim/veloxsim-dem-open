@@ -16,6 +16,7 @@ Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 - **3D mesh import** (OBJ/STL via trimesh)
 - **Velocity Verlet integration**
 - **Fully GPU-resident** via NVIDIA Warp kernels
+- **Google Turbo Colormp** It's a rainbow-style colormap designed to improve upon Jet by being smoother and perceptually uniform
 
 ## Requirements
 
