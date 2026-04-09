@@ -12,7 +12,7 @@ Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 - **JKR cohesion/adhesion** with configurable surface energy
 - **Particle-particle collision** via spatial hash grid broad-phase
 - **Particle-mesh collision** via BVH mesh queries on arbitrary triangular meshes
-- **Moving mesh surfaces** (conveyor belts) with surface velocity parameter
+- **In-plane dynamics** (conveyor belts) with surface velocity parameter
 - **3D mesh import** (OBJ/STL via trimesh)
 - **Velocity Verlet integration**
 - **Fully GPU-resident** via NVIDIA Warp kernels
