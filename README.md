@@ -2,20 +2,21 @@
 
 GPU-accelerated Discrete Element Method (DEM) simulation engine built on [NVIDIA Warp](https://github.com/NVIDIA/warp).
 
-Built by VeloxSim Tech Pty Ltd and Sam Wong.
+Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 
 ## Features
 
 - **Hertz-Mindlin contact model** with tangential spring tracking and viscous damping
 - **Coulomb friction** with static and dynamic coefficients
 - **Type C EPSD rolling resistance** (elastic-plastic spring-dashpot, history-dependent)
-- **JKR cohesion/adhesion** with independent particle-particle and particle-wall surface energy
+- **JKR cohesion/adhesion** with configurable surface energy
 - **Particle-particle collision** via spatial hash grid broad-phase
 - **Particle-mesh collision** via BVH mesh queries on arbitrary triangular meshes
-- **Moving mesh surfaces** (conveyor belts) with surface velocity parameter
+- **In-plane dynamics** (conveyor belts) with surface velocity parameter
 - **3D mesh import** (OBJ/STL via trimesh)
 - **Velocity Verlet integration**
 - **Fully GPU-resident** via NVIDIA Warp kernels
+- **Google Turbo Colormp** It's a rainbow-style colormap designed to improve upon Jet by being smoother and perceptually uniform
 
 ## Requirements
 
