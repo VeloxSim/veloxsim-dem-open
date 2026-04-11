@@ -116,13 +116,26 @@ All simulation parameters are set via `SimConfig`:
 | `friction_static` | 0.5 | Static friction coefficient (mu_s) |
 | `friction_dynamic` | 0.4 | Dynamic friction coefficient (mu_d) |
 | `friction_rolling` | 0.01 | Rolling friction coefficient (mu_r) |
-| `cohesion_energy` | 0.0 J/m^2 | Surface energy for JKR cohesion |
+| `cohesion_energy` | 0.0 J/m^2 | Particle-particle JKR surface energy |
+| `cohesion_energy_wall` | None | Particle-wall JKR surface energy (defaults to `cohesion_energy`) |
 | `global_damping` | 0.0 1/s | Viscous drag coefficient |
-| `dt` | 1e-5 s | Timestep |
+| `dt` | None (auto) | Timestep (auto-computed from Rayleigh wave speed if None) |
 | `gravity` | (0, 0, -9.81) | Gravity vector |
 | `max_contacts_per_particle` | 32 | Contact history slots per particle |
-| `hash_grid_dim` | 128 | Spatial hash grid resolution |
-| `device` | "cuda:0" | Warp compute device |
+| `hash_grid_dim` | None (auto) | Spatial hash grid resolution |
+
+### Separate wall cohesion
+
+The `cohesion_energy_wall` parameter allows independent control of particle-wall adhesion. This is useful for modelling scenarios where wall material properties differ from bulk material, such as sticky material on smooth steel walls:
+
+```python
+config = SimConfig(
+    cohesion_energy=5.0,       # particle-particle: 5 J/m^2
+    cohesion_energy_wall=0.5,  # particle-wall: 0.5 J/m^2 (smooth walls)
+)
+```
+
+When `cohesion_energy_wall` is `None` (default), it falls back to `cohesion_energy` for backward compatibility.
 
 ## Contact Model
 

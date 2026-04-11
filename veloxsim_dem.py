@@ -749,7 +749,8 @@ class SimConfig:
     friction_static: float = 0.5         # mu_s — Coulomb static friction coefficient
     friction_dynamic: float = 0.4        # mu_d — Coulomb kinetic friction coefficient
     friction_rolling: float = 0.01       # mu_r — Type C EPSD rolling resistance coefficient
-    cohesion_energy: float = 0.0         # J/m^2 (0 = no cohesion)
+    cohesion_energy: float = 0.0         # J/m^2 particle-particle (0 = no cohesion)
+    cohesion_energy_wall: Optional[float] = None  # J/m^2 particle-wall (None = same as cohesion_energy)
     dt: Optional[float] = None           # seconds (None = auto from Rayleigh timestep)
     dt_safety_factor: float = 0.2        # fraction of Rayleigh timestep (used when dt=None)
     gravity: tuple = (0.0, 0.0, -9.81)
@@ -796,6 +797,8 @@ class Simulation:
             self.beta = 1.0  # perfectly inelastic
 
         self.cohesion_pulloff = 1.5 * math.pi * config.cohesion_energy * self.R_eff
+        wall_energy = config.cohesion_energy_wall if config.cohesion_energy_wall is not None else config.cohesion_energy
+        self.cohesion_pulloff_wall = 1.5 * math.pi * wall_energy * self.R_eff
 
         # --- Rayleigh timestep ---
         G_shear = E / (2.0 * (1.0 + nu))  # full shear modulus
@@ -1014,7 +1017,7 @@ class Simulation:
                     mesh.id,
                     self.derived_params,
                     mu_s, mu_d, mu_r,
-                    self.cohesion_pulloff, dt,
+                    self.cohesion_pulloff_wall, dt,
                     wp.vec3(surf_vel[0], surf_vel[1], surf_vel[2]),
                 ],
                 device=self.device,
