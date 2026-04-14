@@ -101,6 +101,27 @@ After running, generate the 3D viewer:
 python repose_viewer.py
 ```
 
+### Hopper Discharge
+
+Gravity discharge of a conical hopper used to study bulk
+material flow regimes (mass flow, funnel flow, ratholing, arching) as
+a function of material properties and geometry.  Includes a standalone
+interactive viewer with a Layers mode that colours each particle by
+its initial vertical layer — the classic coloured-sand technique used
+in bulk materials handling research, so the layer deformation reveals
+the flow pattern at a glance.
+
+```bash
+python demo_hopper.py \
+  --hopper-stl STL/Hopper2.stl \
+  --plug-stl STL/plug2.stl \
+  --radius 0.0175 \
+  --sim-time 15
+```
+
+See [**docs/HOPPER.md**](docs/HOPPER.md) for full documentation,
+material-property studies, and viewer controls.
+
 ## Configuration
 
 All simulation parameters are set via `SimConfig`:
