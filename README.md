@@ -10,13 +10,14 @@ Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 - **Coulomb friction** with static and dynamic coefficients
 - **Type C EPSD rolling resistance** (elastic-plastic spring-dashpot, history-dependent)
 - **JKR cohesion/adhesion** with configurable surface energy
+- **Particle size distribution (PSD)** with per-particle radii, masses and inertias; effective radius / mass computed per contact
 - **Particle-particle collision** via spatial hash grid broad-phase
 - **Particle-mesh collision** via BVH mesh queries on arbitrary triangular meshes
 - **In-plane dynamics** (conveyor belts) with surface velocity parameter
 - **3D mesh import** (OBJ/STL via trimesh)
 - **Velocity Verlet integration**
 - **Fully GPU-resident** via NVIDIA Warp kernels
-- **Google Turbo Colormp** It's a rainbow-style colormap designed to improve upon Jet by being smoother and perceptually uniform
+- **Google Turbo colormap** — a rainbow-style colormap designed to improve upon Jet by being smoother and perceptually uniform
 
 ## Requirements
 
@@ -67,60 +68,92 @@ pos = sim.get_positions()      # (N, 3) numpy array
 ke = sim.get_kinetic_energy()  # total KE in Joules
 ```
 
-## Included Tests
+## Included Examples
+
+All examples live under `examples/<name>/`.  Each example is self-contained
+— run the script from anywhere, and it locates the engine (`veloxsim_dem.py`)
+and the shared hopper viewer (`hopper_viewer.py`) at the repo root
+automatically.
 
 ### Conveyor Transfer Chute
 
-Simulates bulk material flow through an STL transfer chute geometry with dynamic particle insertion.
+Simulates bulk material flow through an STL transfer chute geometry
+with dynamic particle insertion (feed conveyor, impact plate, chute,
+receiving conveyor, containment skirts).
 
-![Transfer Chute](assets/chute_viewer.png)
+![Transfer Chute](examples/chute/chute_viewer.png)
 
 ```bash
-python test_stl_chute.py --radius 0.0225 --belt-speed 3.0 --tonnage 3000 --sim-time 10
+python examples/chute/test_stl_chute.py \
+  --radius 0.0225 --belt-speed 3.0 --tonnage 3000 --sim-time 10
 ```
 
-STL geometry files are in the `STL/` directory. After running, use the viewer to regenerate the animation:
+After running, regenerate the animation viewer:
 
 ```bash
-python chute_viewer.py
+python examples/chute/chute_viewer.py
 ```
 
 ### Angle of Repose
 
-Validates JKR cohesion by measuring angle of repose using the cylinder lift method.
+Validates JKR cohesion by measuring angle of repose using the cylinder
+lift method.
 
-![Angle of Repose](assets/repose_viewer.png)
-
-```bash
-python test_repose.py
-```
-
-After running, generate the 3D viewer:
+![Angle of Repose](examples/angle_of_repose/repose_viewer.png)
 
 ```bash
-python repose_viewer.py
+python examples/angle_of_repose/test_repose.py
+python examples/angle_of_repose/repose_viewer.py   # generate viewer
 ```
 
 ### Hopper Discharge
 
-Gravity discharge of a conical hopper used to study bulk
-material flow regimes (mass flow, funnel flow, ratholing, arching) as
-a function of material properties and geometry.  Includes a standalone
-interactive viewer with a Layers mode that colours each particle by
-its initial vertical layer — the classic coloured-sand technique used
-in bulk materials handling research, so the layer deformation reveals
-the flow pattern at a glance.
+Gravity discharge of a conical hopper used to study bulk material flow
+regimes (mass flow, funnel flow, ratholing, arching) as a function of
+material properties and geometry.  Uniform particle radius.  Includes
+an interactive 3D viewer with a Layers mode that colours each particle
+by its initial vertical layer — the classic coloured-sand technique
+used in bulk materials handling research, so the layer deformation
+reveals the flow pattern at a glance.
+
+![Hopper Discharge — Funnel Flow](examples/hopper_discharge/hopper_viewer.png)
 
 ```bash
-python demo_hopper.py \
-  --hopper-stl STL/Hopper2.stl \
-  --plug-stl STL/plug2.stl \
+python examples/hopper_discharge/demo_hopper.py \
+  --hopper-stl examples/hopper_discharge/STL/Hopper2.stl \
+  --plug-stl   examples/hopper_discharge/STL/plug2.stl \
   --radius 0.0175 \
   --sim-time 15
 ```
 
 See [**docs/HOPPER.md**](docs/HOPPER.md) for full documentation,
 material-property studies, and viewer controls.
+
+### PSD Hopper (settling + discharge with a mixed size distribution)
+
+Two-phase workflow for a hopper filled with a multi-class particle
+size distribution (**35 mm / 60 mm / 100 mm** radii at
+**40 / 30 / 30 vol %**).  Particle counts are **back-calculated from a
+2000 kg/m³ bulk density** and the hopper's internal volume, so the fill
+matches a physically realistic packing rather than an arbitrary grid
+size.  Phase 1 settles the bed with `plug2.stl` closing the outlet;
+Phase 2 removes the plug and discharges to a floor below.  Produces a
+self-contained Three.js viewer with correct per-particle radii and
+PSD-aware colouring.
+
+![PSD hopper — early discharge in the Three.js viewer](examples/psd_hopper/psd_hopper_test.png)
+
+```bash
+# Phase 1 — settle the bed
+python examples/psd_hopper/test_psd_hopper.py
+
+# Phase 2 — discharge + interactive HTML viewer
+python examples/psd_hopper/discharge_html.py
+```
+
+See [**docs/PSD_HOPPER.md**](docs/PSD_HOPPER.md) for the full workflow,
+the back-calculation of particle counts, viewer controls, and the
+observed intermittent-arching flow pattern.
 
 ## Configuration
 

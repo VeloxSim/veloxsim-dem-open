@@ -34,6 +34,10 @@ import warp as wp
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+# Make the engine (veloxsim_dem.py) at the repo root importable from this subdir
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 from veloxsim_dem import Simulation, SimConfig, create_plane_mesh
 
 # ---------------------------------------------------------------------------

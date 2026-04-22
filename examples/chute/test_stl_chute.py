@@ -38,6 +38,9 @@ import warp as wp
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+# Make the engine (veloxsim_dem.py) at the repo root importable from this subdir
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 from veloxsim_dem import Simulation, SimConfig
 
 # ---------------------------------------------------------------------------
@@ -55,7 +58,7 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-STL_DIR = pathlib.Path("C:/Users/anthr/OneDrive/Desktop/VeloxSim Demo/Generic")
+STL_DIR = pathlib.Path(__file__).resolve().parent / "STL"
 DESKTOP = pathlib.Path(os.path.expanduser("~")) / "Desktop"
 if args.out_dir:
     OUT_DIR = pathlib.Path(args.out_dir)

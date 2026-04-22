@@ -340,13 +340,42 @@ const SIM = __PAYLOAD__;
 const FRAMES = SIM.frames;
 const STL_DATA = SIM.stl || {};
 const CONFIG = SIM.config;
-const R = CONFIG.radius;
+const R = CONFIG.radius;                                // base (max) radius
+const RADII = CONFIG.radii || null;                     // per-particle radii (PSD)
+const PSD = CONFIG.psd || null;                         // [[r,pct], ...]
 const N_MAX = CONFIG.n_particles;
 
 // Metadata display
-document.getElementById("sim-meta").textContent =
-  `${FRAMES.length} frames  \u00b7  ${N_MAX.toLocaleString()} particles  \u00b7  ` +
-  `R = ${(R*1000).toFixed(1)} mm`;
+let metaStr = `${FRAMES.length} frames  \u00b7  ${N_MAX.toLocaleString()} particles  \u00b7  `;
+if (PSD && PSD.length > 1) {
+  metaStr += 'PSD: ' + PSD.map(([r,p]) => `${(r*1000).toFixed(0)} mm`).join(' / ');
+} else {
+  metaStr += `R = ${(R*1000).toFixed(1)} mm`;
+}
+document.getElementById("sim-meta").textContent = metaStr;
+
+// PSD-aware class colours for solid mode (distinct by radius class)
+const CLASS_COLORS = [
+  new THREE.Color(0x2962ff),   // blue   — smallest class
+  new THREE.Color(0xf57c00),   // orange
+  new THREE.Color(0xd32f2f),   // red    — largest class
+  new THREE.Color(0x22c55e),   // green  — fallbacks if >3 classes
+  new THREE.Color(0x8b5cf6),
+];
+// Map each particle index -> class index (sorted smallest -> largest)
+let CLASS_INDEX = null;
+if (RADII && PSD && PSD.length > 1) {
+  const sortedRadii = PSD.map(p => p[0]).sort((a, b) => a - b);
+  CLASS_INDEX = new Int32Array(RADII.length);
+  for (let i = 0; i < RADII.length; i++) {
+    let best = 0, bestDiff = Infinity;
+    for (let k = 0; k < sortedRadii.length; k++) {
+      const d = Math.abs(sortedRadii[k] - RADII[i]);
+      if (d < bestDiff) { bestDiff = d; best = k; }
+    }
+    CLASS_INDEX[i] = best;
+  }
+}
 
 // ==================================================================
 // Three.js scene
@@ -522,10 +551,20 @@ function setFrame(idx) {
       const lid = (fr.l && p < fr.l.length) ? fr.l[p] : 0;
       tc.copy(LAYER_COLORS[lid % LAYER_COLORS.length]);
     } else {
-      tc.copy(solidColor);
+      // Solid mode: colour by PSD class if available
+      if (CLASS_INDEX) {
+        tc.copy(CLASS_COLORS[CLASS_INDEX[p] % CLASS_COLORS.length]);
+      } else {
+        tc.copy(solidColor);
+      }
     }
     inst.setColorAt(p, tc);
     d.position.set(pos[0], pos[1], pos[2]);
+    // Per-particle scale for PSD (base geometry was built at max radius R)
+    if (RADII) {
+      const s = RADII[p] / R;
+      d.scale.set(s, s, s);
+    }
     d.updateMatrix();
     inst.setMatrixAt(p, d.matrix);
   }
