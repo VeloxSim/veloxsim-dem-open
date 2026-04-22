@@ -4,7 +4,7 @@ A DEM simulation of gravity-driven hopper discharge, used to
 study flow regimes (mass flow, funnel flow, ratholing, arching) as a
 function of material properties and hopper geometry.
 
-![Hopper Discharge — Funnel Flow with Layered Particles](../assets/hopper_viewer.png)
+![Hopper Discharge — Funnel Flow with Layered Particles](../examples/hopper_discharge/hopper_viewer.png)
 
 *Hopper2.stl with 57,791 particles (R = 17.5 mm) shown in the Layers
 colour mode.  The classic V-shaped distortion of the middle layers is
@@ -39,10 +39,10 @@ position so they stop contributing to contact detection.
 ## Files
 
 ```
-demo_hopper.py        # Simulation runner
-hopper_viewer.py      # Interactive 3D HTML viewer generator
-STL/Hopper2.stl       # Example conical hopper geometry
-STL/plug2.stl         # Plug mesh that blocks the outlet during settling
+examples/hopper_discharge/demo_hopper.py        # Simulation runner
+hopper_viewer.py                                # Interactive 3D HTML viewer generator (repo root)
+examples/hopper_discharge/STL/Hopper2.stl       # Example conical hopper geometry
+examples/hopper_discharge/STL/plug2.stl         # Plug mesh that blocks the outlet during settling
 ```
 
 ## Quick Start
@@ -50,9 +50,9 @@ STL/plug2.stl         # Plug mesh that blocks the outlet during settling
 Default run with 35 mm particles and the bundled STL files:
 
 ```bash
-python demo_hopper.py \
-  --hopper-stl STL/Hopper2.stl \
-  --plug-stl STL/plug2.stl \
+python examples/hopper_discharge/demo_hopper.py \
+  --hopper-stl examples/hopper_discharge/STL/Hopper2.stl \
+  --plug-stl examples/hopper_discharge/STL/plug2.stl \
   --radius 0.0175 \
   --sim-time 15
 ```
@@ -66,9 +66,9 @@ done.
 Crank up rolling friction and cohesion to induce funnel flow:
 
 ```bash
-python demo_hopper.py \
-  --hopper-stl STL/Hopper2.stl \
-  --plug-stl STL/plug2.stl \
+python examples/hopper_discharge/demo_hopper.py \
+  --hopper-stl examples/hopper_discharge/STL/Hopper2.stl \
+  --plug-stl examples/hopper_discharge/STL/plug2.stl \
   --radius 0.0175 \
   --friction-static 1.0 \
   --friction-rolling 1.5 \
@@ -86,11 +86,11 @@ re-settling, save the packed positions once and replay them:
 
 ```bash
 # First run: full settling + discharge, saves packed_positions.npy
-python demo_hopper.py --hopper-stl STL/Hopper2.stl --plug-stl STL/plug2.stl
+python examples/hopper_discharge/demo_hopper.py --hopper-stl examples/hopper_discharge/STL/Hopper2.stl --plug-stl examples/hopper_discharge/STL/plug2.stl
 
 # Subsequent runs: skip settling, just discharge with different cohesion
-python demo_hopper.py \
-  --hopper-stl STL/Hopper2.stl \
+python examples/hopper_discharge/demo_hopper.py \
+  --hopper-stl examples/hopper_discharge/STL/Hopper2.stl \
   --packed ~/Desktop/veloxsim_hopper/packed_positions.npy \
   --cohesion 50 --cohesion-wall 150
 ```

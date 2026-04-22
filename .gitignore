@@ -1,4 +1,4 @@
-# Claude Code
+# Local agent / session metadata
 .claude/
 
 # Byte-compiled / optimized / DLL files
@@ -208,3 +208,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# VeloxSim simulation caches and large generated artifacts
+*.npz
+examples/**/psd_hopper_discharge.json
+examples/**/psd_hopper_discharge.html
+examples/**/psd_hopper_discharge.gif

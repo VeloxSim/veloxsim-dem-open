@@ -124,6 +124,11 @@ import warp as wp
 wp.init()
 
 import trimesh
+
+# Make the engine (veloxsim_dem.py) at the repo root importable from this subdir
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 from veloxsim_dem import Simulation, SimConfig, load_mesh, create_plane_mesh
 
 DEVICE = args.device

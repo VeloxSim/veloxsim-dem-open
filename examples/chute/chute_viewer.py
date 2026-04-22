@@ -9,7 +9,7 @@ import numpy as np
 import trimesh
 
 OUT_DIR = pathlib.Path.home() / "Desktop" / "veloxsim_conveyor_v2"
-STL_DIR = pathlib.Path("C:/Users/anthr/OneDrive/Desktop/VeloxSim Demo/Generic")
+STL_DIR = pathlib.Path(__file__).resolve().parent / "STL"
 RESULTS = OUT_DIR / "stl_results.json"
 
 if not RESULTS.exists():
