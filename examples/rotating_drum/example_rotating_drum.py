@@ -1,40 +1,36 @@
-"""Rotating drum — Phase 2 kinematic rotation validation.
+"""Rotating drum with lifters — Phase 2 kinematic rotation validation.
 
 A horizontal cylindrical drum (axis along Y) rotates at a prescribed angular
-velocity about its central axis.  Particles are first settled inside the drum
-under gravity; the drum then spins and the particles are tumbled.
+velocity about its central axis.  Six rectangular lifter blades are attached
+to the inner wall.  Particles are settled under gravity then tumbled by the
+spinning drum.
 
 Physics validated
 -----------------
-* Correct rotational contact arm: the wall velocity at the contact point is
-  ``v_wall = omega x (p_contact - origin)``.  If the arm is wrong the
-  particles do not accelerate tangentially (they just rattle against a
-  "stationary" wall even though the BVH geometry is rotating).
-* Contact history rotation: stored tangent/roll spring displacements are
-  rotated by the step quaternion each step.  Without this, friction forces
-  develop a sawtooth artefact once the drum has turned more than a few
-  degrees from the frame in which the displacements were computed.
-* BVH refit: the transform kernel updates all vertices from rest-frame
-  positions each step, then refit() updates the BVH.  Particles must not
-  fall through the drum wall.
+* Rotational contact arm: wall velocity at contact = omega x (p_contact - origin).
+  Lifters mechanically scoop particles — if the arm is missing, particles only
+  receive friction from the smooth wall and cannot be properly lifted.
+* Contact history rotation: stored spring displacements are rotated by the
+  step quaternion each step to keep friction frame-correct.
+* BVH refit: full rigid-body transform from rest-frame vertices each step;
+  particles must remain inside the drum (no tunnelling through wall or lifters).
 
 Operating parameters
 --------------------
-Drum radius R = 0.15 m, length L = 0.30 m (axis along Y).
-Default omega = 3 rad/s (~29 rpm) — well below the critical speed at which
-particles centrifuge to the wall (~8 rad/s for r_particle = 0.01 m).
+Drum R = 0.15 m, L = 0.30 m (axis along Y).  6 lifters, 3.5 cm height.
+Default 45 rpm — well below critical speed (~8 rad/s for 10 mm particles).
 Tunnelling criterion: v_wall * dt < r_particle
-    => 0.15 * 3 * 5e-5 = 2.25e-5 m  <<  0.01 m  (safe)
+    => 0.15 * 4.71 * 5e-5 = 3.5e-5 m  <<  0.01 m  (safe)
 
 Usage
 -----
-Full run (produces JSON + HTML viewer + PNG summary)::
+Full run (produces JSON + HTML viewer + PNG)::
 
     python example_rotating_drum.py
 
 Custom RPM::
 
-    python example_rotating_drum.py --rpm 20
+    python example_rotating_drum.py --rpm 60
 
 CI acceptance test::
 
@@ -58,7 +54,7 @@ import warp as wp
 from veloxsim_dem import (
     SimConfig,
     Simulation,
-    create_cylinder_mesh,
+    create_drum_with_lifters_mesh,
 )
 from hopper_viewer import generate_hopper_html
 
@@ -71,57 +67,52 @@ OUTPUT_PNG  = HERE / "rotating_drum.png"
 DRUM_RADIUS      = 0.15      # m
 DRUM_LENGTH      = 0.30      # m
 DRUM_N_THETA     = 48        # circumferential segments
+DRUM_N_LIFTERS   = 6
+DRUM_LIFTER_H    = 0.035     # m — lifter protrusion from wall
 
 PARTICLE_RADIUS  = 0.010     # m  (10 mm)
 PARTICLE_DENSITY = 2500.0    # kg/m³
 N_PARTICLES      = 60
 
-DEFAULT_RPM      = 30.0      # rev/min (≈ 3.14 rad/s)
+DEFAULT_RPM      = 45.0      # rev/min
 
 DT               = 5e-5      # s
 
-SETTLE_STEPS     = 2000      # steps with drum stationary
-SPIN_STEPS       = 3000      # steps with drum rotating
+SETTLE_STEPS     = 2000      # drum stationary
+SPIN_STEPS       = 16000     # full run (0.8 s at dt=5e-5 → ~270° at 45 rpm)
 
-FRAME_STRIDE     = 50        # steps between viewer frames
+FRAME_STRIDE     = 40        # steps between viewer frames
 
-# CI tolerances
-CI_SPIN_STEPS    = 2000      # shorter run for CI
-CI_KE_RATIO_MIN  = 1.5       # KE after / KE before must exceed this
+# CI
+CI_SPIN_STEPS    = 2000
+CI_KE_RATIO_MIN  = 1.5       # KE_final / KE_settled must exceed this
 
 
 def _pack_positions_inside_drum(n, r_particle, drum_radius, drum_length, rng):
-    """Randomly place n particles in a cylinder (axis = Y, centre = origin)."""
+    """Randomly place n particles inside the drum without overlaps."""
     drum_half = drum_length * 0.5 - r_particle
     safe_r    = drum_radius - r_particle * 1.5
     positions = []
     attempts  = 0
     while len(positions) < n and attempts < n * 500:
         attempts += 1
-        # uniform in disk using rejection
         rx = rng.uniform(-safe_r, safe_r)
         rz = rng.uniform(-safe_r, safe_r)
         if math.sqrt(rx**2 + rz**2) > safe_r:
             continue
         ry = rng.uniform(-drum_half, drum_half)
-        # overlap check
-        ok = True
-        for p in positions:
-            if math.dist([rx, ry, rz], p) < r_particle * 2.2:
-                ok = False
-                break
-        if ok:
+        if all(math.dist([rx, ry, rz], p) >= r_particle * 2.2 for p in positions):
             positions.append([rx, ry, rz])
     if len(positions) < n:
         raise RuntimeError(
             f"Only placed {len(positions)}/{n} particles — "
-            "try fewer particles or a larger drum."
+            "reduce N_PARTICLES or increase drum size."
         )
     return np.array(positions, dtype=np.float32)
 
 
 def run(rpm: float = DEFAULT_RPM, ci: bool = False):
-    omega_rad_s = rpm * 2.0 * math.pi / 60.0   # rad/s, about Y axis
+    omega = rpm * 2.0 * math.pi / 60.0   # rad/s
 
     spin_steps = CI_SPIN_STEPS if ci else SPIN_STEPS
 
@@ -137,7 +128,7 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
         friction_rolling=0.01,
         dt=DT,
         gravity=(0.0, 0.0, -9.81),
-        global_damping=2.0,   # speed settle; turned off during spin validation
+        global_damping=2.0,
         device="cuda:0",
     )
     sim = Simulation(config)
@@ -148,11 +139,13 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
     )
     sim.initialize_particles(init_pos)
 
-    # Drum mesh — created centred at world origin; rotation origin = (0,0,0)
-    drum = create_cylinder_mesh(
+    # Drum with lifters — centred at world origin; rotation about Y axis
+    drum = create_drum_with_lifters_mesh(
         radius=DRUM_RADIUS,
         length=DRUM_LENGTH,
         n_theta=DRUM_N_THETA,
+        n_lifters=DRUM_N_LIFTERS,
+        lifter_height=DRUM_LIFTER_H,
         end_caps=True,
         device=config.device,
     )
@@ -166,20 +159,18 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
         sim.step()
     wp.synchronize()
     ke_settled = sim.get_kinetic_energy()
-    settle_wall = time.perf_counter() - t0
-    print(f"  done in {settle_wall:.1f}s  |  KE after settle = {ke_settled:.4e} J")
+    print(f"  done in {time.perf_counter()-t0:.1f}s  |  "
+          f"KE = {ke_settled:.3e} J")
 
-    # Turn off global damping before spin so we can measure proper KE increase
-    sim.config.global_damping = 0.0
+    sim.config.global_damping = 0.0   # clean Coulomb for spin phase
 
-    # ── Phase 2: start drum rotation ─────────────────────────────────────────
-    sim.set_mesh_angular_velocity(drum_idx, (0.0, omega_rad_s, 0.0), origin=(0.0, 0.0, 0.0))
-    print(f"Spinning drum at {rpm:.1f} rpm  ({omega_rad_s:.3f} rad/s) "
+    # ── Phase 2: spin ─────────────────────────────────────────────────────────
+    sim.set_mesh_angular_velocity(drum_idx, (0.0, omega, 0.0), origin=(0.0, 0.0, 0.0))
+    print(f"Spinning at {rpm:.1f} rpm  ({omega:.3f} rad/s) "
           f"for {spin_steps} steps …")
 
-    frames   = []
-    ke_log   = []
-    t_log    = []
+    frames = []
+    ke_log, t_log = [], []
 
     def record():
         wp.synchronize()
@@ -194,7 +185,7 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
             "mesh_poses": sim.get_mesh_poses(),
         })
 
-    record()
+    record()   # frame 0: drum at rest angle, particles settled
     t0 = time.perf_counter()
     for step in range(1, spin_steps + 1):
         sim.step()
@@ -204,41 +195,36 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
             t_log.append(float(sim.sim_time))
 
     wp.synchronize()
-    spin_wall = time.perf_counter() - t0
-    ke_final  = sim.get_kinetic_energy()
-    print(f"  done in {spin_wall:.1f}s  |  {len(frames)} frames  "
-          f"|  KE final = {ke_final:.4e} J")
+    spin_wall  = time.perf_counter() - t0
+    ke_final   = sim.get_kinetic_energy()
+    pos_final  = sim.get_positions()
+    radial     = np.sqrt(pos_final[:, 0]**2 + pos_final[:, 2]**2)
+    max_radial = float(np.max(radial))
+    escaped    = int(np.sum(radial > DRUM_RADIUS + PARTICLE_RADIUS * 0.5))
+    ke_ratio   = ke_final / (ke_settled + 1e-12)
+
+    print(f"  done in {spin_wall:.1f}s  |  {len(frames)} frames")
+    print(f"  KE ratio = {ke_ratio:.2f}  (threshold {CI_KE_RATIO_MIN})")
+    print(f"  Max radial = {max_radial:.4f} m  |  escaped = {escaped}")
 
     # ── CI assertions ─────────────────────────────────────────────────────────
-    ke_ratio = ke_final / (ke_settled + 1e-12)
-    print(f"  KE ratio (final / settled) = {ke_ratio:.2f}  "
-          f"(threshold {CI_KE_RATIO_MIN})")
-
-    # Tunnelling check: no particle should be outside the drum radius
-    wp.synchronize()
-    pos = sim.get_positions()
-    radial = np.sqrt(pos[:, 0]**2 + pos[:, 2]**2)
-    max_radial = float(np.max(radial))
-    escaped = int(np.sum(radial > DRUM_RADIUS + PARTICLE_RADIUS * 0.5))
-    print(f"  Max radial position = {max_radial:.4f} m  "
-          f"(drum radius = {DRUM_RADIUS} m)  |  escaped = {escaped}")
-
     if ci:
         ok = True
         if ke_ratio < CI_KE_RATIO_MIN:
-            print(f"CI: FAIL — KE ratio {ke_ratio:.2f} < threshold {CI_KE_RATIO_MIN}")
+            print(f"CI: FAIL — KE ratio {ke_ratio:.2f} < {CI_KE_RATIO_MIN}")
             ok = False
         if escaped > 0:
             print(f"CI: FAIL — {escaped} particle(s) escaped drum (tunnelling)")
             ok = False
-        if ok:
-            print("CI: PASS")
-            sys.exit(0)
-        else:
-            sys.exit(1)
+        print("CI: PASS" if ok else "CI: FAIL")
+        sys.exit(0 if ok else 1)
 
     # ── Write JSON + HTML viewer ──────────────────────────────────────────────
-    radii_np = sim.get_radii()
+    # Use rest-frame vertices for the STL so the Three.js viewer can apply the
+    # quaternion correctly (body.rest_points_wp holds the un-rotated vertices).
+    drum_body = sim.meshes[drum_idx]
+    radii_np  = sim.get_radii()
+
     payload = {
         "config": {
             "n_particles":  N_PARTICLES,
@@ -248,11 +234,13 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
             "sim_time":     float(sim.sim_time),
             "drum_radius":  DRUM_RADIUS,
             "drum_length":  DRUM_LENGTH,
+            "n_lifters":    DRUM_N_LIFTERS,
+            "lifter_height": DRUM_LIFTER_H,
             "rpm":          rpm,
-            "omega_rad_s":  omega_rad_s,
-            "description":  "Rotating drum — Phase 2 kinematic rotation",
+            "omega_rad_s":  omega,
+            "description":  "Rotating drum with lifters — Phase 2 kinematic rotation",
         },
-        "stl":    {"drum": _mesh_to_stl_dict(drum)},
+        "stl":    {"drum": _body_to_stl_dict(drum_body)},
         "frames": frames,
     }
 
@@ -263,18 +251,22 @@ def run(rpm: float = DEFAULT_RPM, ci: bool = False):
     print(f"Generating {OUTPUT_HTML.name} …")
     generate_hopper_html(
         str(OUTPUT_JSON), str(OUTPUT_HTML),
-        title=f"VeloxSim-DEM — Rotating Drum ({rpm:.0f} rpm)",
-        max_anim_frames=400,
+        title=f"VeloxSim-DEM — Rotating Drum with Lifters ({rpm:.0f} rpm)",
+        max_anim_frames=500,
         max_particles_per_frame=N_PARTICLES,
     )
 
-    _render_png(pos, radii_np, ke_log, t_log, ke_settled, rpm)
-    print(f"Done.  Open {OUTPUT_HTML} in a browser to watch the drum spin.")
+    _render_png(pos_final, radii_np, ke_log, t_log, ke_settled, rpm)
+    print(f"Done.  Open {OUTPUT_HTML} in a browser to see the drum with lifters.")
 
 
-def _mesh_to_stl_dict(mesh) -> dict:
-    verts = mesh.points.numpy()
-    return {"v": np.round(verts, 5).tolist(), "f": mesh.indices.numpy().tolist()}
+def _body_to_stl_dict(body) -> dict:
+    """Rest-frame vertices for the Three.js viewer — NOT the current rotated state."""
+    verts = body.rest_points_wp.numpy()          # (N, 3) float32, unmodified
+    return {
+        "v": np.round(verts, 5).tolist(),
+        "f": body.mesh.indices.numpy().tolist(),
+    }
 
 
 def _render_png(final_pos, radii, ke_log, t_log, ke_settled, rpm):
@@ -289,25 +281,42 @@ def _render_png(final_pos, radii, ke_log, t_log, ke_settled, rpm):
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Left: XZ scatter of final particle positions vs drum outline
+    # Left: XZ cross-section with drum wall and lifter outlines
     ax = axes[0]
-    theta_plt = np.linspace(0, 2 * math.pi, 200)
+    theta_plt = np.linspace(0, 2 * math.pi, 300)
     ax.plot(DRUM_RADIUS * np.cos(theta_plt), DRUM_RADIUS * np.sin(theta_plt),
             "b-", linewidth=2, label="Drum wall")
+
+    # Draw lifter outlines at their FINAL angle (for reference)
+    body_quat = None  # we don't have the body here — draw at angle=0 for simplicity
+    for k in range(DRUM_N_LIFTERS):
+        th = 2 * math.pi * k / DRUM_N_LIFTERS
+        dth = 0.06
+        r_tip = DRUM_RADIUS - DRUM_LIFTER_H
+        for sign in [-1, 1]:
+            x0 = DRUM_RADIUS * math.cos(th + sign * dth)
+            z0 = DRUM_RADIUS * math.sin(th + sign * dth)
+            x1 = r_tip * math.cos(th + sign * dth)
+            z1 = r_tip * math.sin(th + sign * dth)
+            ax.plot([x0, x1], [z0, z1], "b-", linewidth=1, alpha=0.5)
+        ax.plot([r_tip * math.cos(th - dth), r_tip * math.cos(th + dth)],
+                [r_tip * math.sin(th - dth), r_tip * math.sin(th + dth)],
+                "b-", linewidth=1, alpha=0.5)
+
     colors = plt.cm.viridis(np.linspace(0, 1, len(final_pos)))
     for pos_i, c in zip(final_pos, colors):
         circle = mp.Circle((pos_i[0], pos_i[2]), radii[0], color=c, alpha=0.8)
         ax.add_patch(circle)
     ax.set_aspect("equal")
-    ax.set_xlim(-DRUM_RADIUS * 1.2, DRUM_RADIUS * 1.2)
-    ax.set_ylim(-DRUM_RADIUS * 1.2, DRUM_RADIUS * 1.2)
+    ax.set_xlim(-DRUM_RADIUS * 1.25, DRUM_RADIUS * 1.25)
+    ax.set_ylim(-DRUM_RADIUS * 1.25, DRUM_RADIUS * 1.25)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Z (m)")
-    ax.set_title(f"Final particle positions (XZ cross-section)\n{rpm:.0f} rpm")
+    ax.set_title(f"Final particle positions (XZ)  |  {rpm:.0f} rpm")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Right: KE vs time during spin phase
+    # Right: KE vs time during spin
     ax2 = axes[1]
     ax2.plot(t_log, ke_log, "r-", linewidth=1.5, label="Kinetic energy")
     ax2.axhline(ke_settled, color="gray", linestyle="--", linewidth=1,
@@ -319,8 +328,8 @@ def _render_png(final_pos, radii, ke_log, t_log, ke_settled, rpm):
     ax2.grid(True, alpha=0.3)
 
     fig.suptitle(
-        f"Rotating Drum  |  R = {DRUM_RADIUS*100:.0f} cm  |  "
-        f"{rpm:.0f} rpm  |  {N_PARTICLES} particles",
+        f"Rotating Drum with Lifters  |  R={DRUM_RADIUS*100:.0f} cm  |  "
+        f"{DRUM_N_LIFTERS} lifters  |  {rpm:.0f} rpm  |  {N_PARTICLES} particles",
         fontsize=12,
     )
     fig.tight_layout()

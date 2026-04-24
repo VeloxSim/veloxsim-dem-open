@@ -1046,6 +1046,107 @@ def create_cylinder_mesh(
     )
 
 
+def create_drum_with_lifters_mesh(
+    radius: float = 0.15,
+    length: float = 0.30,
+    n_theta: int = 48,
+    n_lifters: int = 6,
+    lifter_height: float = 0.035,
+    lifter_half_angle: float = 0.06,
+    end_caps: bool = True,
+    device: str = "cuda:0",
+) -> wp.Mesh:
+    """Create a cylindrical drum mesh with rectangular lifter blades.
+
+    Lifters are radial rectangular fins evenly spaced around the inner
+    circumference.  They protrude inward by *lifter_height* and have an
+    angular half-width of *lifter_half_angle* radians.  The cylinder axis
+    is along Y, centred at the world origin with inward-facing normals.
+
+    Args:
+        radius:            Drum inner radius (m).
+        length:            Drum length along Y (m).
+        n_theta:           Circumferential segments for the cylinder wall.
+        n_lifters:         Number of evenly spaced lifter blades.
+        lifter_height:     Lifter protrusion from the drum wall (m).
+        lifter_half_angle: Angular half-width of each lifter (radians).
+        end_caps:          If True, flat end caps are included.
+        device:            Warp device string.
+
+    Returns:
+        wp.Mesh centred at the world origin with inward-facing normals.
+    """
+    half_L  = length * 0.5
+    thetas  = [2.0 * math.pi * k / n_theta for k in range(n_theta)]
+
+    verts: list[list[float]] = []
+    faces: list[int] = []
+
+    # ── Cylinder lateral surface ──────────────────────────────────────────────
+    for t in thetas:
+        verts.append([radius * math.cos(t), -half_L, radius * math.sin(t)])  # ring 0
+    for t in thetas:
+        verts.append([radius * math.cos(t),  half_L, radius * math.sin(t)])  # ring 1
+
+    for k in range(n_theta):
+        k1 = (k + 1) % n_theta
+        BL, BR = k,           k1
+        TL, TR = k + n_theta, k1 + n_theta
+        faces += [BL, BR, TR,  BL, TR, TL]         # inward normals ✓
+
+    # ── End caps ─────────────────────────────────────────────────────────────
+    if end_caps:
+        bot_ctr = len(verts)
+        verts.append([0.0, -half_L, 0.0])
+        for k in range(n_theta):
+            faces += [bot_ctr, k, (k + 1) % n_theta]
+
+        top_ctr = len(verts)
+        verts.append([0.0, half_L, 0.0])
+        for k in range(n_theta):
+            TL_i = k  + n_theta
+            TR_i = (k + 1) % n_theta + n_theta
+            faces += [top_ctr, TR_i, TL_i]
+
+    # ── Lifter blades ─────────────────────────────────────────────────────────
+    r_tip = radius - lifter_height
+    dth   = lifter_half_angle
+
+    for k in range(n_lifters):
+        theta = 2.0 * math.pi * k / n_lifters
+        v0 = len(verts)
+
+        # 8 corners: foot (at R) and inner tip (at r_tip), left/right × bot/top
+        # Indices relative to v0:
+        #   0=flb  1=flt  2=frb  3=frt   (foot: left/right × bot/top)
+        #   4=ilb  5=ilt  6=irb  7=irt   (inner: left/right × bot/top)
+        for th, y in [(theta - dth, -half_L), (theta - dth, half_L),
+                      (theta + dth, -half_L), (theta + dth, half_L)]:
+            verts.append([radius * math.cos(th), y, radius * math.sin(th)])
+        for th, y in [(theta - dth, -half_L), (theta - dth, half_L),
+                      (theta + dth, -half_L), (theta + dth, half_L)]:
+            verts.append([r_tip  * math.cos(th), y, r_tip  * math.sin(th)])
+
+        flb, flt, frb, frt = v0,   v0+1, v0+2, v0+3
+        ilb, ilt, irb, irt = v0+4, v0+5, v0+6, v0+7
+
+        # Inner (tip) face — the primary particle-contact surface
+        faces += [ilb, irb, irt,  ilb, irt, ilt]
+
+        # Left side face
+        faces += [flb, ilb, ilt,  flb, ilt, flt]
+
+        # Right side face
+        faces += [frb, frt, irt,  frb, irt, irb]
+
+    verts_np = np.array(verts, dtype=np.float32)
+    faces_np = np.array(faces, dtype=np.int32)
+    return wp.Mesh(
+        points=wp.array(verts_np, dtype=wp.vec3, device=device),
+        indices=wp.array(faces_np, dtype=wp.int32, device=device),
+    )
+
+
 def create_vertical_wall_mesh(
     x0: float, x1: float,
     z0: float, z1: float,
