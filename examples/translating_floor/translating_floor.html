@@ -1,213 +1,6 @@
-"""
-Generate an interactive HTML viewer for hopper discharge simulations.
-
-Features:
-- Three.js 3D particle animation with hopper geometry
-- Three colour modes: Solid, Velocity, Layers (coloured-sand technique)
-- Clipping plane through the hopper centre (Y=0) to see flow patterns
-- Cinema mode for full-screen video recording
-- Playback speed control, particle count HUD, colour bar
-
-The Layers mode uses nearest-neighbour tracking between consecutive frames
-to propagate layer IDs from the initial z-position of each particle — the
-classic coloured-sand technique used in bulk materials handling research.
-
-Usage:
-    python hopper_viewer.py --results hopper_results.json \\
-                            --output hopper_animation.html
-
-Built by VeloxSim Tech Pty Ltd and Sam Wong.
-"""
-from __future__ import annotations
-
-import argparse
-import json
-import math
-import pathlib
-import sys
-import time
-from typing import Optional
-
-import numpy as np
-
-
-def generate_hopper_html(
-    results_path: str | pathlib.Path,
-    output_path: str | pathlib.Path,
-    title: str = "VeloxSim-DEM Hopper Discharge",
-    max_anim_frames: int = 200,
-    max_particles_per_frame: int = 30_000,
-) -> pathlib.Path:
-    """Generate a self-contained HTML file with a 3D hopper animation.
-
-    Parameters
-    ----------
-    results_path
-        JSON file produced by ``demo_hopper.py`` with ``config``, ``frames``
-        and optional ``stl``.
-    output_path
-        Where to write the HTML file.
-    title
-        Page title.
-    max_anim_frames
-        Max number of animation frames to embed.
-    max_particles_per_frame
-        Max particles per frame (subsampled if exceeded).
-
-    Returns
-    -------
-    pathlib.Path
-        The output HTML path.
-    """
-    results_path = pathlib.Path(results_path)
-    output_path = pathlib.Path(output_path)
-
-    # ------------------------------------------------------------------
-    # Load simulation results
-    # ------------------------------------------------------------------
-    print(f"Loading {results_path.name}...", flush=True)
-    with open(results_path) as f:
-        data = json.load(f)
-
-    config = data["config"]
-    frames = data["frames"]
-    stl_data = data.get("stl", {})
-    MAX_PARTICLES = config.get("n_particles", 5000)
-
-    # ------------------------------------------------------------------
-    # Subsample frames + propagate layer IDs via nearest-neighbour
-    # tracking.  Each particle keeps the layer colour it had in the
-    # first frame, so the layer deformation reveals the flow pattern
-    # (the classic coloured-sand technique).
-    # ------------------------------------------------------------------
-    PARTICLE_SUBSAMPLE = max(1, MAX_PARTICLES // max_particles_per_frame)
-    step = max(1, len(frames) // max_anim_frames)
-    anim_frames = []
-    max_n = 0
-
-    try:
-        from scipy.spatial import cKDTree
-        _has_scipy = True
-    except ImportError:
-        _has_scipy = False
-        print("  WARNING: scipy not available — layer colors will be slower")
-
-    N_LAYERS = 8
-    first_fr = frames[0]
-    first_pos_full = np.array(
-        first_fr.get("pos", first_fr.get("p", [])), dtype=np.float32
-    )
-    if len(first_pos_full) > 0:
-        live_mask_0 = first_pos_full[:, 2] < 500.0
-        first_live = first_pos_full[live_mask_0]
-        if len(first_live) > 0:
-            z_min_init = float(first_live[:, 2].min())
-            z_max_init = float(first_live[:, 2].max())
-        else:
-            z_min_init, z_max_init = 0.0, 1.0
-    else:
-        z_min_init, z_max_init = 0.0, 1.0
-    z_range_init = max(z_max_init - z_min_init, 1e-6)
-
-    def _assign_initial_layers(positions):
-        layers = np.zeros(len(positions), dtype=np.int8)
-        for i in range(len(positions)):
-            z = positions[i][2]
-            if z >= 500.0:
-                layers[i] = 0
-            else:
-                lid = int((z - z_min_init) / z_range_init * N_LAYERS)
-                layers[i] = max(0, min(N_LAYERS - 1, lid))
-        return layers
-
-    print(f"  Tracking particle layers through {len(frames)} frames...", flush=True)
-    full_layers = [None] * len(frames)
-    prev_pos = np.array(
-        frames[0].get("pos", frames[0].get("p", [])), dtype=np.float32
-    )
-    full_layers[0] = _assign_initial_layers(prev_pos)
-
-    for fi in range(1, len(frames)):
-        cur_pos = np.array(
-            frames[fi].get("pos", frames[fi].get("p", [])), dtype=np.float32
-        )
-        if len(cur_pos) == 0 or len(prev_pos) == 0:
-            full_layers[fi] = np.zeros(len(cur_pos), dtype=np.int8)
-            prev_pos = cur_pos
-            continue
-        if _has_scipy:
-            tree = cKDTree(prev_pos)
-            _, nn_idx = tree.query(cur_pos, k=1)
-            cur_layers = full_layers[fi - 1][nn_idx]
-        else:
-            cur_layers = np.zeros(len(cur_pos), dtype=np.int8)
-            for ci in range(len(cur_pos)):
-                d2 = np.sum((prev_pos - cur_pos[ci]) ** 2, axis=1)
-                nn = int(d2.argmin())
-                cur_layers[ci] = full_layers[fi - 1][nn]
-        full_layers[fi] = cur_layers
-        prev_pos = cur_pos
-
-    for fi in range(0, len(frames), step):
-        fr = frames[fi]
-        frame_layers = full_layers[fi]
-        n_fr = fr.get("n", len(fr.get("pos", [])))
-        indices = list(range(0, n_fr, PARTICLE_SUBSAMPLE))
-        n_sub = len(indices)
-        max_n = max(max_n, n_sub)
-
-        compact = {"t": round(fr["t"], 3), "n": n_sub, "p": [], "s": [], "l": []}
-        if "mesh_poses" in fr:
-            compact["mesh_poses"] = fr["mesh_poses"]
-        pos_data = fr.get("pos", fr.get("p", []))
-        vel_data = fr.get("vel", [])
-        speed_data = fr.get("s", [])
-
-        for i in indices:
-            px, py, pz = pos_data[i]
-            compact["p"].append([round(px, 3), round(py, 3), round(pz, 3)])
-            if speed_data:
-                compact["s"].append(round(speed_data[i], 2))
-            elif vel_data:
-                vx, vy, vz = vel_data[i]
-                compact["s"].append(round(math.sqrt(vx * vx + vy * vy + vz * vz), 2))
-            else:
-                compact["s"].append(0.0)
-            compact["l"].append(int(frame_layers[i]) if i < len(frame_layers) else 0)
-        anim_frames.append(compact)
-
-    print(f"  {len(anim_frames)} frames, max {max_n} particles/frame", flush=True)
-
-    # ------------------------------------------------------------------
-    # Build payload
-    # ------------------------------------------------------------------
-    payload = json.dumps(
-        {
-            "config": {**config, "n_particles": max_n},
-            "stl": stl_data,
-            "frames": anim_frames,
-        },
-        separators=(",", ":"),
-    )
-    print(f"  Payload: {len(payload)/1024/1024:.1f} MB", flush=True)
-
-    # ------------------------------------------------------------------
-    # Generate HTML
-    # ------------------------------------------------------------------
-    html = _HTML_TEMPLATE.replace("__PAYLOAD__", payload).replace("__TITLE__", title)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    print(f"  Written: {output_path}", flush=True)
-    return output_path
-
-
-# ======================================================================
-# HTML Template
-# ======================================================================
-
-_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<!DOCTYPE html>
 <html><head><meta charset="UTF-8"/>
-<title>__TITLE__</title>
+<title>VeloxSim-DEM — Translating Floor (Phase 1 dynamics)</title>
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js" } }
 </script>
@@ -290,7 +83,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="viewport"></div>
 
 <div id="info">
-  <h1 id="sim-title">__TITLE__</h1>
+  <h1 id="sim-title">VeloxSim-DEM — Translating Floor (Phase 1 dynamics)</h1>
   <div class="meta" id="sim-meta"></div>
 </div>
 
@@ -338,7 +131,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 import * as THREE from 'three';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/controls/OrbitControls.js';
 
-const SIM = __PAYLOAD__;
+const SIM = {"config":{"n_particles":1,"radius":0.01,"radii":[0.01],"dt":5e-05,"sim_time":0.05000000000000092,"floor_velocity":0.1,"description":"Particle riding a rising floor \u2014 Phase 1 geometry dynamics"},"stl":{"floor":{"v":[[-0.5,-0.5,0.003000000026077032],[0.5,-0.5,0.003000000026077032],[0.5,0.5,0.003000000026077032],[-0.5,0.5,0.003000000026077032]],"f":[0,1,2,0,2,3]}},"frames":[{"t":0.0,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.0],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.02,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.01],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.021,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.07],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0001],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.022,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.13],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0002],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.023,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.14],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0003],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.024,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.13],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0004],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.025,"n":1,"p":[[0.0,0.0,0.01]],"s":[0.11],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0005],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.026,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0006],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.027,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.09],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0007],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.028,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.08],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0008],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.029,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.08],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0009],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.03,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.09],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.001],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.031,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0011],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.032,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0012],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.033,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.11],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0013],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.034,"n":1,"p":[[0.0,0.0,0.011]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0014],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.035,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0015],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.036,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0016],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.037,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0017],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.038,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0018],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.039,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0019],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.04,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.002],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.041,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0021],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.042,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0022],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.043,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0023],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.044,"n":1,"p":[[0.0,0.0,0.012]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0024],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.045,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0025],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.046,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0026],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.047,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0027],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.048,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0028],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.049,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.0029],"quat":[0.0,0.0,0.0,1.0]}]},{"t":0.05,"n":1,"p":[[0.0,0.0,0.013]],"s":[0.1],"l":[0],"mesh_poses":[{"pos":[0.0,0.0,0.003],"quat":[0.0,0.0,0.0,1.0]}]}]};
 const FRAMES = SIM.frames;
 const STL_DATA = SIM.stl || {};
 const CONFIG = SIM.config;
@@ -779,35 +572,3 @@ window.addEventListener("resize", () => {
 });
 </script>
 </body></html>
-"""
-
-
-# ======================================================================
-# CLI entry point
-# ======================================================================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Generate interactive HTML viewer for hopper discharge results"
-    )
-    parser.add_argument("--results", required=True,
-                        help="Path to hopper_results.json")
-    parser.add_argument("--output", required=True,
-                        help="Output HTML file path")
-    parser.add_argument("--title", default="VeloxSim-DEM Hopper Discharge",
-                        help="Page title")
-    parser.add_argument("--max-frames", type=int, default=200,
-                        help="Max animation frames to embed")
-    parser.add_argument("--max-particles", type=int, default=30_000,
-                        help="Max particles per frame (subsampled if exceeded)")
-    args = parser.parse_args()
-
-    t0 = time.perf_counter()
-    generate_hopper_html(
-        results_path=args.results,
-        output_path=args.output,
-        title=args.title,
-        max_anim_frames=args.max_frames,
-        max_particles_per_frame=args.max_particles,
-    )
-    print(f"Done in {time.perf_counter() - t0:.1f}s")

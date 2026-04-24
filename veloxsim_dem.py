@@ -9,6 +9,8 @@ Features:
     - Particle-particle collision with spatial hash grid broad-phase
     - Particle-mesh collision using BVH mesh queries
     - Moving mesh surfaces (conveyor belts) via surface_velocity parameter
+    - Kinematic geometry dynamics: meshes can translate at a prescribed linear_velocity;
+      vertices are updated and the BVH is refitted each step so contacts remain correct
     - Velocity Verlet time integration
     - 3D triangular mesh import (OBJ/STL via trimesh)
     - Particle size distribution (PSD): user-specified discrete size classes with
@@ -791,6 +793,17 @@ def integrate_phase2_kernel(
 
 
 @wp.kernel
+def translate_mesh_vertices_kernel(
+    points: wp.array(dtype=wp.vec3),
+    velocity: wp.vec3,
+    dt: float,
+):
+    """Shift every mesh vertex by velocity * dt for kinematic rigid-body translation."""
+    i = wp.tid()
+    points[i] = points[i] + velocity * dt
+
+
+@wp.kernel
 def compute_kinetic_energy_kernel(
     velocities: wp.array(dtype=wp.vec3),
     angular_velocities: wp.array(dtype=wp.vec3),
@@ -1147,8 +1160,11 @@ class Simulation:
         self.hash_grid = wp.HashGrid(dim, dim, dim, device=self.device)
         self.cell_size = 2.0 * self.max_radius * 2.1
 
-        # Mesh list
-        self.meshes: list[tuple[wp.Mesh, tuple[float, float, float]]] = []
+        # Mesh list — each entry: (mesh, linear_velocity, surface_velocity, position)
+        # linear_velocity: rigid-body velocity [vx,vy,vz] — moves vertices each step
+        # surface_velocity: extra surface slip [vx,vy,vz] — friction only (conveyor belt)
+        # position: np.ndarray tracking accumulated displacement from initial pose
+        self.meshes: list[tuple] = []
 
         # Diagnostic energy buffer
         self._energy_buf = wp.zeros(1, dtype=float, device=self.device)
@@ -1182,10 +1198,29 @@ class Simulation:
     def add_mesh(
         self,
         mesh: wp.Mesh,
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         surface_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
-        """Add a collision mesh to the simulation."""
-        self.meshes.append((mesh, surface_velocity))
+        """Add a collision mesh to the simulation.
+
+        Args:
+            mesh: Warp Mesh object.
+            linear_velocity: Rigid-body velocity (vx, vy, vz) in m/s. The mesh
+                vertices are physically translated by this velocity each timestep
+                and the BVH is refitted so contacts against the moving surface
+                remain correct.  This velocity is also used as the wall velocity
+                in the contact friction calculation.
+            surface_velocity: Additional surface slip (vx, vy, vz) in m/s added
+                on top of linear_velocity for the friction calculation only —
+                the mesh geometry does not move.  Use for conveyor-belt surfaces
+                that are not themselves translating (backward-compatible).
+        """
+        self.meshes.append((
+            mesh,
+            list(linear_velocity),
+            list(surface_velocity),
+            np.zeros(3, dtype=np.float64),
+        ))
         N = self.num_particles
         self._mesh_tangent_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         self._mesh_roll_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
@@ -1194,15 +1229,54 @@ class Simulation:
         self,
         filepath: str,
         scale: float = 1.0,
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         surface_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> wp.Mesh:
         """Load and add a mesh from an OBJ or STL file."""
         mesh = load_mesh(filepath, scale=scale, device=self.device)
-        self.meshes.append((mesh, surface_velocity))
+        self.meshes.append((
+            mesh,
+            list(linear_velocity),
+            list(surface_velocity),
+            np.zeros(3, dtype=np.float64),
+        ))
         N = self.num_particles
         self._mesh_tangent_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         self._mesh_roll_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         return mesh
+
+    def set_mesh_velocity(
+        self,
+        mesh_idx: int,
+        linear_velocity: tuple[float, float, float],
+    ):
+        """Change the linear velocity of a mesh during the simulation.
+
+        Args:
+            mesh_idx: Index of the mesh (order it was added via add_mesh).
+            linear_velocity: New (vx, vy, vz) velocity in m/s.
+        """
+        mesh, _, surf_vel, position = self.meshes[mesh_idx]
+        self.meshes[mesh_idx] = (mesh, list(linear_velocity), surf_vel, position)
+
+    def get_mesh_poses(self) -> list[dict]:
+        """Return the current pose of every mesh as a list of dicts.
+
+        Each dict has:
+            pos  -- [x, y, z] accumulated displacement from the initial position
+            quat -- [qx, qy, qz, qw] orientation quaternion (identity for Phase 1)
+
+        Suitable for embedding in the animation JSON consumed by hopper_viewer.py.
+        """
+        poses = []
+        for _mesh, _lv, _sv, position in self.meshes:
+            poses.append({
+                "pos":  [round(float(position[0]), 5),
+                         round(float(position[1]), 5),
+                         round(float(position[2]), 5)],
+                "quat": [0.0, 0.0, 0.0, 1.0],
+            })
+        return poses
 
     def step(self):
         """Advance simulation by one timestep using Velocity Verlet integration.
@@ -1228,6 +1302,22 @@ class Simulation:
             ],
             device=self.device,
         )
+
+        # Kinematic mesh translation — move vertices to their t+dt position so
+        # the BVH is current when particle-mesh contacts are computed below.
+        for mesh, lin_vel, _sv, position in self.meshes:
+            if lin_vel[0] != 0.0 or lin_vel[1] != 0.0 or lin_vel[2] != 0.0:
+                lv = wp.vec3(lin_vel[0], lin_vel[1], lin_vel[2])
+                wp.launch(
+                    translate_mesh_vertices_kernel,
+                    dim=mesh.points.shape[0],
+                    inputs=[mesh.points, lv, dt],
+                    device=self.device,
+                )
+                mesh.refit()
+                position[0] += lin_vel[0] * dt
+                position[1] += lin_vel[1] * dt
+                position[2] += lin_vel[2] * dt
 
         # Clear forces
         wp.launch(
@@ -1281,9 +1371,15 @@ class Simulation:
         )
 
         # Particle-mesh forces
-        for (mesh, surf_vel), tang, roll in zip(
+        for (mesh, lin_vel, surf_vel, _pos), tang, roll in zip(
             self.meshes, self._mesh_tangent_disps_list, self._mesh_roll_disps_list
         ):
+            # Effective wall velocity = rigid-body motion + conveyor-belt slip
+            eff_vel = wp.vec3(
+                lin_vel[0] + surf_vel[0],
+                lin_vel[1] + surf_vel[1],
+                lin_vel[2] + surf_vel[2],
+            )
             wp.launch(
                 compute_mesh_forces_kernel,
                 dim=N,
@@ -1295,7 +1391,7 @@ class Simulation:
                     mesh.id,
                     self.derived_params,
                     mu_s, mu_d, mu_r, dt,
-                    wp.vec3(surf_vel[0], surf_vel[1], surf_vel[2]),
+                    eff_vel,
                 ],
                 device=self.device,
             )
