@@ -447,7 +447,12 @@ const labelZ = makeLabel('Z', '#4488ff'); labelZ.position.set(0, 0, 1.35); gizmo
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 let clipEnabled = false;
 
-// STL meshes — keep references so setFrame() can update their pose each frame
+// STL meshes — two-pass render to fix transparency sort artefacts on
+// self-occluding geometry (e.g. drum + inward-protruding lifters):
+//   pass 1 — BackSide  + depthWrite ON  + higher opacity (solid backdrop)
+//   pass 2 — FrontSide + depthWrite OFF + lower  opacity (see-through front)
+// Both passes share the same BufferGeometry; the parent Group carries the
+// per-frame pose so setFrame() can still treat each STL as one entry.
 const stlMeshes = [];
 for (const [name, mesh] of Object.entries(STL_DATA)) {
   const geo = new THREE.BufferGeometry();
@@ -456,14 +461,30 @@ for (const [name, mesh] of Object.entries(STL_DATA)) {
   geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
   geo.setIndex(new THREE.BufferAttribute(faces, 1));
   geo.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({
+
+  const backMat = new THREE.MeshStandardMaterial({
     color: 0x3b82f6, metalness: 0.2, roughness: 0.5,
-    side: THREE.DoubleSide, transparent: true, opacity: 0.5,
+    side: THREE.BackSide,
+    transparent: true, opacity: 0.65, depthWrite: true,
     clippingPlanes: [],
   });
-  const m = new THREE.Mesh(geo, mat);
-  scene.add(m);
-  stlMeshes.push(m);
+  const frontMat = new THREE.MeshStandardMaterial({
+    color: 0x3b82f6, metalness: 0.2, roughness: 0.5,
+    side: THREE.FrontSide,
+    transparent: true, opacity: 0.22, depthWrite: false,
+    clippingPlanes: [],
+  });
+
+  const back  = new THREE.Mesh(geo, backMat);
+  const front = new THREE.Mesh(geo, frontMat);
+  back.renderOrder  = 0;
+  front.renderOrder = 1;
+
+  const group = new THREE.Group();
+  group.add(back);
+  group.add(front);
+  scene.add(group);
+  stlMeshes.push(group);
 }
 
 // Particles
