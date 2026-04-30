@@ -14,6 +14,7 @@ Built by VeloxSim Tech Pty Ltd (www.veloxsim.com) and Sam Wong.
 - **Particle-particle collision** via spatial hash grid broad-phase
 - **Particle-mesh collision** via BVH mesh queries on arbitrary triangular meshes
 - **In-plane dynamics** (conveyor belts) with surface velocity parameter
+- **Kinematic mesh motion** — per-mesh `linear_velocity` / `angular_velocity` rigidly translate and rotate the geometry every timestep with BVH refit, rotational contact arm `omega x (p - origin)` in the wall-velocity, and friction-history rotation so contact stays frame-correct under motion
 - **3D mesh import** (OBJ/STL via trimesh)
 - **Velocity Verlet integration**
 - **Fully GPU-resident** via NVIDIA Warp kernels
@@ -154,6 +155,27 @@ python examples/psd_hopper/discharge_html.py
 See [**docs/PSD_HOPPER.md**](docs/PSD_HOPPER.md) for the full workflow,
 the back-calculation of particle counts, viewer controls, and the
 observed intermittent-arching flow pattern.
+
+### Rotating Drum (kinematic rotation + lifters)
+
+Particles tumble inside a horizontally-spinning drum fitted with six
+radial lifter blades.  Demonstrates per-step quaternion integration of
+the drum pose, the rotational contact arm `omega x (p - origin)` in
+the wall-velocity, and friction-history rotation so tangential springs
+remain frame-correct as the geometry spins.  The lifters carry
+particles up the wall and dump them across the bed; settled kinetic
+energy is ~7.7x that of a smooth-wall drum at the same rpm.
+
+
+```bash
+python examples/rotating_drum/example_rotating_drum.py
+```
+
+See [**docs/ROTATING_DRUM.md**](docs/ROTATING_DRUM.md) for the full
+write-up of the new kinematic-geometry API (per-mesh `linear_velocity`
+/ `angular_velocity` / `origin`, `set_mesh_angular_velocity`,
+`get_mesh_poses`), the per-step kernel pipeline, and the physics
+validated by the example.
 
 ## Configuration
 

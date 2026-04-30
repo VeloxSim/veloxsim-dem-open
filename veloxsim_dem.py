@@ -9,6 +9,13 @@ Features:
     - Particle-particle collision with spatial hash grid broad-phase
     - Particle-mesh collision using BVH mesh queries
     - Moving mesh surfaces (conveyor belts) via surface_velocity parameter
+    - Kinematic geometry dynamics Phase 1: meshes translate at a prescribed
+      linear_velocity; BVH refitted each step so contacts remain correct
+    - Kinematic geometry dynamics Phase 2: meshes rotate at a prescribed
+      angular_velocity about an origin; rest-frame vertices are transformed
+      by the current quaternion each step; contact history is rotated to
+      stay frame-correct; rotational arm (omega x r) included in contact
+      velocity so friction acts against the moving surface
     - Velocity Verlet time integration
     - 3D triangular mesh import (OBJ/STL via trimesh)
     - Particle size distribution (PSD): user-specified discrete size classes with
@@ -628,6 +635,9 @@ def compute_mesh_forces_kernel(
     mu_r: float,
     dt: float,
     surface_velocity: wp.vec3,
+    linear_velocity: wp.vec3,
+    angular_velocity: wp.vec3,
+    mesh_origin: wp.vec3,
 ):
     """Compute particle-mesh contact forces using BVH mesh query.
 
@@ -635,8 +645,10 @@ def compute_mesh_forces_kernel(
     wall has infinite radius (R_eff = R_particle) and infinite mass
     (m_eff = m_particle).
 
-    surface_velocity: velocity of the mesh surface (e.g. conveyor belt).
-    Friction and rolling resistance act relative to that surface velocity.
+    Wall velocity at the contact point is:
+        v_wall = linear_velocity + cross(angular_velocity, mesh_point - mesh_origin)
+                 + surface_velocity
+    Friction and rolling resistance act relative to that wall velocity.
     Includes Type C EPSD rolling resistance for particle-wall contacts.
     """
     i = wp.tid()
@@ -681,8 +693,10 @@ def compute_mesh_forces_kernel(
         S_n = wp.float32(2.0) * dp.E_eff * sqrt_R * sqrt_delta
         F_n_mag = (wp.float32(4.0) / wp.float32(3.0)) * dp.E_eff * sqrt_R * delta_n * sqrt_delta
 
-        # Relative velocity of particle vs. mesh surface (translational only)
-        v_rel = vi - surface_velocity
+        # Wall velocity at contact: rigid-body motion + rotational arm + belt slip
+        arm = mesh_point - mesh_origin
+        v_wall = linear_velocity + wp.cross(angular_velocity, arm) + surface_velocity
+        v_rel = vi - v_wall
         v_n_mag = wp.dot(v_rel, n)
         v_n = n * v_n_mag
         v_t = v_rel - v_n
@@ -788,6 +802,52 @@ def integrate_phase2_kernel(
     inv_I = inv_inertias[tid]
     velocities[tid] = velocities[tid] + forces[tid] * (wp.float32(0.5) * dt * inv_m)
     angular_velocities[tid] = angular_velocities[tid] + torques[tid] * (wp.float32(0.5) * dt * inv_I)
+
+
+@wp.kernel
+def translate_mesh_vertices_kernel(
+    points: wp.array(dtype=wp.vec3),
+    velocity: wp.vec3,
+    dt: float,
+):
+    """Shift every mesh vertex by velocity * dt for kinematic rigid-body translation."""
+    i = wp.tid()
+    points[i] = points[i] + velocity * dt
+
+
+@wp.kernel
+def transform_mesh_vertices_kernel(
+    rest_points: wp.array(dtype=wp.vec3),
+    points: wp.array(dtype=wp.vec3),
+    origin: wp.vec3,
+    quat: wp.quat,
+    translation: wp.vec3,
+):
+    """Apply a full rigid-body transform to mesh vertices from rest-frame positions.
+
+    p_world = rotate(quat, p_rest - origin) + origin + translation
+    """
+    i = wp.tid()
+    p_local = rest_points[i] - origin
+    p_rotated = wp.quat_rotate(quat, p_local)
+    points[i] = p_rotated + origin + translation
+
+
+@wp.kernel
+def rotate_contact_history_kernel(
+    tangent_disps: wp.array(dtype=wp.vec3),
+    roll_disps: wp.array(dtype=wp.vec3),
+    step_quat: wp.quat,
+):
+    """Rotate per-particle contact spring displacements by the mesh's step rotation.
+
+    Without this, world-space tangent/roll vectors become incorrect after the
+    mesh rotates, causing friction force errors proportional to the rotation
+    per step.
+    """
+    i = wp.tid()
+    tangent_disps[i] = wp.quat_rotate(step_quat, tangent_disps[i])
+    roll_disps[i]    = wp.quat_rotate(step_quat, roll_disps[i])
 
 
 @wp.kernel
@@ -918,6 +978,175 @@ def create_rect_mesh(
     )
 
 
+def create_cylinder_mesh(
+    radius: float = 0.15,
+    length: float = 0.30,
+    n_theta: int = 32,
+    end_caps: bool = True,
+    device: str = "cuda:0",
+) -> wp.Mesh:
+    """Create a cylindrical drum mesh with inward-facing normals.
+
+    The cylinder axis lies along Y.  Particles placed inside the drum contact
+    the inner surface.  End caps (flat circles) are optionally added so the
+    drum is fully enclosed.
+
+    Args:
+        radius: Cylinder inner radius (m).
+        length: Cylinder length along Y (m).
+        n_theta: Number of circumferential segments.
+        end_caps: If True, flat circular end caps are included.
+        device: Warp device string.
+
+    Returns:
+        wp.Mesh centred at the world origin with inward-facing normals.
+    """
+    half_L = length * 0.5
+    thetas  = [2.0 * math.pi * k / n_theta for k in range(n_theta)]
+
+    verts: list[list[float]] = []
+    # Ring 0: y = -half_L  (indices 0 .. n_theta-1)
+    for t in thetas:
+        verts.append([radius * math.cos(t), -half_L, radius * math.sin(t)])
+    # Ring 1: y = +half_L  (indices n_theta .. 2*n_theta-1)
+    for t in thetas:
+        verts.append([radius * math.cos(t),  half_L, radius * math.sin(t)])
+
+    faces: list[int] = []
+    # Lateral faces — inward normals (CW from outside)
+    # Winding: [BL, BR, TR], [BL, TR, TL]  →  normal points inward ✓
+    for k in range(n_theta):
+        k1 = (k + 1) % n_theta
+        BL, BR = k,           k1
+        TL, TR = k + n_theta, k1 + n_theta
+        faces += [BL, BR, TR,  BL, TR, TL]
+
+    if end_caps:
+        # Bottom cap at y = -half_L, normal = +Y (toward interior)
+        bot_ctr = len(verts)
+        verts.append([0.0, -half_L, 0.0])
+        for k in range(n_theta):
+            k1 = (k + 1) % n_theta
+            faces += [bot_ctr, k, k1]           # CCW from +Y → normal = +Y
+
+        # Top cap at y = +half_L, normal = -Y (toward interior)
+        top_ctr = len(verts)
+        verts.append([0.0, half_L, 0.0])
+        for k in range(n_theta):
+            k1 = (k + 1) % n_theta
+            TL_i = k  + n_theta
+            TR_i = k1 + n_theta
+            faces += [top_ctr, TR_i, TL_i]      # reversed → normal = -Y
+
+    verts_np = np.array(verts, dtype=np.float32)
+    faces_np = np.array(faces, dtype=np.int32)
+    return wp.Mesh(
+        points=wp.array(verts_np, dtype=wp.vec3, device=device),
+        indices=wp.array(faces_np, dtype=wp.int32, device=device),
+    )
+
+
+def create_drum_with_lifters_mesh(
+    radius: float = 0.15,
+    length: float = 0.30,
+    n_theta: int = 48,
+    n_lifters: int = 6,
+    lifter_height: float = 0.035,
+    lifter_half_angle: float = 0.06,
+    end_caps: bool = True,
+    device: str = "cuda:0",
+) -> wp.Mesh:
+    """Create a cylindrical drum mesh with rectangular lifter blades.
+
+    Lifters are radial rectangular fins evenly spaced around the inner
+    circumference.  They protrude inward by *lifter_height* and have an
+    angular half-width of *lifter_half_angle* radians.  The cylinder axis
+    is along Y, centred at the world origin with inward-facing normals.
+
+    Args:
+        radius:            Drum inner radius (m).
+        length:            Drum length along Y (m).
+        n_theta:           Circumferential segments for the cylinder wall.
+        n_lifters:         Number of evenly spaced lifter blades.
+        lifter_height:     Lifter protrusion from the drum wall (m).
+        lifter_half_angle: Angular half-width of each lifter (radians).
+        end_caps:          If True, flat end caps are included.
+        device:            Warp device string.
+
+    Returns:
+        wp.Mesh centred at the world origin with inward-facing normals.
+    """
+    half_L  = length * 0.5
+    thetas  = [2.0 * math.pi * k / n_theta for k in range(n_theta)]
+
+    verts: list[list[float]] = []
+    faces: list[int] = []
+
+    # ── Cylinder lateral surface ──────────────────────────────────────────────
+    for t in thetas:
+        verts.append([radius * math.cos(t), -half_L, radius * math.sin(t)])  # ring 0
+    for t in thetas:
+        verts.append([radius * math.cos(t),  half_L, radius * math.sin(t)])  # ring 1
+
+    for k in range(n_theta):
+        k1 = (k + 1) % n_theta
+        BL, BR = k,           k1
+        TL, TR = k + n_theta, k1 + n_theta
+        faces += [BL, BR, TR,  BL, TR, TL]         # inward normals ✓
+
+    # ── End caps ─────────────────────────────────────────────────────────────
+    if end_caps:
+        bot_ctr = len(verts)
+        verts.append([0.0, -half_L, 0.0])
+        for k in range(n_theta):
+            faces += [bot_ctr, k, (k + 1) % n_theta]
+
+        top_ctr = len(verts)
+        verts.append([0.0, half_L, 0.0])
+        for k in range(n_theta):
+            TL_i = k  + n_theta
+            TR_i = (k + 1) % n_theta + n_theta
+            faces += [top_ctr, TR_i, TL_i]
+
+    # ── Lifter blades ─────────────────────────────────────────────────────────
+    r_tip = radius - lifter_height
+    dth   = lifter_half_angle
+
+    for k in range(n_lifters):
+        theta = 2.0 * math.pi * k / n_lifters
+        v0 = len(verts)
+
+        # 8 corners: foot (at R) and inner tip (at r_tip), left/right × bot/top
+        # Indices relative to v0:
+        #   0=flb  1=flt  2=frb  3=frt   (foot: left/right × bot/top)
+        #   4=ilb  5=ilt  6=irb  7=irt   (inner: left/right × bot/top)
+        for th, y in [(theta - dth, -half_L), (theta - dth, half_L),
+                      (theta + dth, -half_L), (theta + dth, half_L)]:
+            verts.append([radius * math.cos(th), y, radius * math.sin(th)])
+        for th, y in [(theta - dth, -half_L), (theta - dth, half_L),
+                      (theta + dth, -half_L), (theta + dth, half_L)]:
+            verts.append([r_tip  * math.cos(th), y, r_tip  * math.sin(th)])
+
+        flb, flt, frb, frt = v0,   v0+1, v0+2, v0+3
+        ilb, ilt, irb, irt = v0+4, v0+5, v0+6, v0+7
+
+        # Inner (tip) face — the primary particle-contact surface
+        faces += [ilb, irb, irt,  ilb, irt, ilt]
+
+        # Left side face
+        faces += [flb, ilb, ilt,  flb, ilt, flt]
+
+        # Right side face
+        faces += [frb, frt, irt,  frb, irt, irb]
+
+    verts_np = np.array(verts, dtype=np.float32)
+    faces_np = np.array(faces, dtype=np.int32)
+    return wp.Mesh(
+        points=wp.array(verts_np, dtype=wp.vec3, device=device),
+        indices=wp.array(faces_np, dtype=wp.int32, device=device),
+    )
+
+
 def create_vertical_wall_mesh(
     x0: float, x1: float,
     z0: float, z1: float,
@@ -995,6 +1224,82 @@ def create_angled_plate_mesh(
         points=wp.array(vertices, dtype=wp.vec3, device=device),
         indices=wp.array(faces, dtype=np.int32, device=device),
     )
+
+
+# ---------------------------------------------------------------------------
+# Quaternion helpers (host-side, used for kinematic mesh integration)
+# ---------------------------------------------------------------------------
+
+def _quat_step(q: np.ndarray, omega: np.ndarray, dt: float) -> np.ndarray:
+    """Integrate quaternion q by angular velocity omega over timestep dt.
+
+    q  : (x, y, z, w) numpy array — current orientation
+    omega : (3,) angular velocity in rad/s (world frame)
+    Returns normalised (x, y, z, w) array.
+    """
+    angle = float(np.linalg.norm(omega)) * dt
+    if angle < 1.0e-10:
+        return q.copy()
+    axis = omega / np.linalg.norm(omega)
+    half = angle * 0.5
+    s = math.sin(half)
+    sq = np.array([axis[0] * s, axis[1] * s, axis[2] * s, math.cos(half)], dtype=np.float64)
+    # Hamilton product: step_q ⊗ q  (x,y,z,w convention)
+    ax, ay, az, aw = sq
+    bx, by, bz, bw = q
+    result = np.array([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ], dtype=np.float64)
+    return result / np.linalg.norm(result)
+
+
+# ---------------------------------------------------------------------------
+# MeshBody — kinematic rigid-body state for a collision mesh
+# ---------------------------------------------------------------------------
+
+class MeshBody:
+    """Holds a wp.Mesh together with its kinematic pose and velocity state.
+
+    Stores rest-frame vertex positions on the GPU so that the full rigid
+    transform (translate + rotate) can be applied each timestep without
+    accumulating floating-point drift.
+
+    Attributes
+    ----------
+    mesh             : wp.Mesh — the BVH-backed collision surface
+    rest_points_wp   : wp.array(dtype=vec3) — GPU copy of initial vertices
+    linear_velocity  : [vx, vy, vz] in m/s — translational rigid-body motion
+    angular_velocity : [wx, wy, wz] in rad/s — rotational rigid-body motion
+    surface_velocity : [vx, vy, vz] — extra surface slip for friction only
+                       (conveyor belt add-on, does not move vertices)
+    origin           : (3,) np.float64 — rotation centre in world space
+    position         : (3,) np.float64 — accumulated translation from initial pose
+    quaternion       : (4,) np.float64 — current orientation (x, y, z, w)
+    """
+
+    def __init__(
+        self,
+        mesh: "wp.Mesh",
+        linear_velocity: tuple = (0.0, 0.0, 0.0),
+        angular_velocity: tuple = (0.0, 0.0, 0.0),
+        surface_velocity: tuple = (0.0, 0.0, 0.0),
+        origin: tuple = (0.0, 0.0, 0.0),
+        device: str = "cuda:0",
+    ):
+        self.mesh             = mesh
+        self.linear_velocity  = [float(v) for v in linear_velocity]
+        self.angular_velocity = [float(v) for v in angular_velocity]
+        self.surface_velocity = [float(v) for v in surface_velocity]
+        self.origin           = np.array(origin,            dtype=np.float64)
+        self.position         = np.zeros(3,                 dtype=np.float64)
+        self.quaternion       = np.array([0., 0., 0., 1.],  dtype=np.float64)
+
+        # GPU copy of initial (rest-frame) vertex positions — never mutated
+        verts_np = mesh.points.numpy()      # (N, 3) float32
+        self.rest_points_wp = wp.array(verts_np, dtype=wp.vec3, device=device)
 
 
 # ---------------------------------------------------------------------------
@@ -1147,8 +1452,8 @@ class Simulation:
         self.hash_grid = wp.HashGrid(dim, dim, dim, device=self.device)
         self.cell_size = 2.0 * self.max_radius * 2.1
 
-        # Mesh list
-        self.meshes: list[tuple[wp.Mesh, tuple[float, float, float]]] = []
+        # Mesh list — each entry is a MeshBody (see class definition above)
+        self.meshes: list[MeshBody] = []
 
         # Diagnostic energy buffer
         self._energy_buf = wp.zeros(1, dtype=float, device=self.device)
@@ -1182,10 +1487,34 @@ class Simulation:
     def add_mesh(
         self,
         mesh: wp.Mesh,
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         surface_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
-        """Add a collision mesh to the simulation."""
-        self.meshes.append((mesh, surface_velocity))
+        """Add a collision mesh to the simulation.
+
+        Args:
+            mesh: Warp Mesh object.
+            linear_velocity: Rigid-body translational velocity (vx, vy, vz) in m/s.
+                Vertices are physically moved and the BVH is refitted each step.
+            angular_velocity: Rigid-body angular velocity (wx, wy, wz) in rad/s.
+                Rotation is applied about *origin* each step.
+            surface_velocity: Additional surface slip (vx, vy, vz) in m/s for the
+                friction calculation only — geometry does not move.  Use for
+                conveyor-belt surfaces that are not themselves translating.
+            origin: Rotation centre (x, y, z) in world space.  Ignored when
+                angular_velocity is zero.
+        """
+        body = MeshBody(
+            mesh,
+            linear_velocity=linear_velocity,
+            angular_velocity=angular_velocity,
+            surface_velocity=surface_velocity,
+            origin=origin,
+            device=self.device,
+        )
+        self.meshes.append(body)
         N = self.num_particles
         self._mesh_tangent_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         self._mesh_roll_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
@@ -1194,15 +1523,84 @@ class Simulation:
         self,
         filepath: str,
         scale: float = 1.0,
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         surface_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> wp.Mesh:
         """Load and add a mesh from an OBJ or STL file."""
         mesh = load_mesh(filepath, scale=scale, device=self.device)
-        self.meshes.append((mesh, surface_velocity))
+        body = MeshBody(
+            mesh,
+            linear_velocity=linear_velocity,
+            angular_velocity=angular_velocity,
+            surface_velocity=surface_velocity,
+            origin=origin,
+            device=self.device,
+        )
+        self.meshes.append(body)
         N = self.num_particles
         self._mesh_tangent_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         self._mesh_roll_disps_list.append(wp.zeros(N, dtype=wp.vec3, device=self.device))
         return mesh
+
+    def set_mesh_velocity(
+        self,
+        mesh_idx: int,
+        linear_velocity: tuple[float, float, float],
+    ):
+        """Change the linear velocity of a mesh during the simulation.
+
+        Args:
+            mesh_idx: Index of the mesh (order it was added via add_mesh).
+            linear_velocity: New (vx, vy, vz) velocity in m/s.
+        """
+        self.meshes[mesh_idx].linear_velocity = [float(v) for v in linear_velocity]
+
+    def set_mesh_angular_velocity(
+        self,
+        mesh_idx: int,
+        angular_velocity: tuple[float, float, float],
+        origin: tuple[float, float, float] | None = None,
+    ):
+        """Change the angular velocity of a mesh during the simulation.
+
+        Args:
+            mesh_idx: Index of the mesh (order it was added via add_mesh).
+            angular_velocity: New (wx, wy, wz) angular velocity in rad/s.
+            origin: Rotation centre (x, y, z) in world space.  If None the
+                existing origin is kept.
+        """
+        body = self.meshes[mesh_idx]
+        body.angular_velocity = [float(v) for v in angular_velocity]
+        if origin is not None:
+            body.origin = np.array(origin, dtype=np.float64)
+
+    def get_mesh_poses(self) -> list[dict]:
+        """Return the current pose of every mesh as a list of dicts.
+
+        Each dict has:
+            pos  -- [x, y, z] accumulated translation from the initial position
+            quat -- [qx, qy, qz, qw] current orientation quaternion
+
+        Suitable for embedding in the animation JSON consumed by hopper_viewer.py.
+        The viewer applies these as a Three.js position + quaternion on the STL
+        mesh which was loaded at its rest-frame vertex positions.
+        """
+        poses = []
+        for body in self.meshes:
+            p = body.position
+            q = body.quaternion
+            poses.append({
+                "pos":  [round(float(p[0]), 5),
+                         round(float(p[1]), 5),
+                         round(float(p[2]), 5)],
+                "quat": [round(float(q[0]), 6),
+                         round(float(q[1]), 6),
+                         round(float(q[2]), 6),
+                         round(float(q[3]), 6)],
+            })
+        return poses
 
     def step(self):
         """Advance simulation by one timestep using Velocity Verlet integration.
@@ -1228,6 +1626,68 @@ class Simulation:
             ],
             device=self.device,
         )
+
+        # Kinematic mesh motion — move vertices to their t+dt position and refit
+        # the BVH so contacts are resolved against the current geometry.
+        for i_body, body in enumerate(self.meshes):
+            lv = body.linear_velocity
+            av = body.angular_velocity
+            has_rot = av[0] != 0.0 or av[1] != 0.0 or av[2] != 0.0
+            has_lin = lv[0] != 0.0 or lv[1] != 0.0 or lv[2] != 0.0
+
+            if has_rot:
+                omega = np.array(av, dtype=np.float64)
+                # Compute step quaternion (exact axis-angle rotation for this dt)
+                angle = float(np.linalg.norm(omega)) * dt
+                if angle >= 1.0e-10:
+                    axis = omega / np.linalg.norm(omega)
+                    half = angle * 0.5
+                    s = math.sin(half)
+                    step_q_arr = np.array([axis[0]*s, axis[1]*s, axis[2]*s, math.cos(half)])
+                    step_q_wp = wp.quat(
+                        float(step_q_arr[0]), float(step_q_arr[1]),
+                        float(step_q_arr[2]), float(step_q_arr[3]),
+                    )
+                    # Rotate stored contact spring displacements into the new frame
+                    tang = self._mesh_tangent_disps_list[i_body]
+                    roll = self._mesh_roll_disps_list[i_body]
+                    wp.launch(
+                        rotate_contact_history_kernel,
+                        dim=N,
+                        inputs=[tang, roll, step_q_wp],
+                        device=self.device,
+                    )
+                    # Integrate quaternion: new_q = step_q ⊗ old_q
+                    body.quaternion = _quat_step(body.quaternion, omega, dt)
+
+                body.position += np.array(lv, dtype=np.float64) * dt
+
+                # Apply full rigid transform from rest-frame vertices
+                q = body.quaternion
+                quat_wp = wp.quat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+                orig_wp = wp.vec3(float(body.origin[0]), float(body.origin[1]), float(body.origin[2]))
+                pos_wp  = wp.vec3(float(body.position[0]), float(body.position[1]), float(body.position[2]))
+                wp.launch(
+                    transform_mesh_vertices_kernel,
+                    dim=body.mesh.points.shape[0],
+                    inputs=[body.rest_points_wp, body.mesh.points, orig_wp, quat_wp, pos_wp],
+                    device=self.device,
+                )
+                body.mesh.refit()
+
+            elif has_lin:
+                # Pure translation — cheaper path
+                lv_wp = wp.vec3(lv[0], lv[1], lv[2])
+                wp.launch(
+                    translate_mesh_vertices_kernel,
+                    dim=body.mesh.points.shape[0],
+                    inputs=[body.mesh.points, lv_wp, dt],
+                    device=self.device,
+                )
+                body.mesh.refit()
+                body.position[0] += lv[0] * dt
+                body.position[1] += lv[1] * dt
+                body.position[2] += lv[2] * dt
 
         # Clear forces
         wp.launch(
@@ -1281,9 +1741,13 @@ class Simulation:
         )
 
         # Particle-mesh forces
-        for (mesh, surf_vel), tang, roll in zip(
+        for body, tang, roll in zip(
             self.meshes, self._mesh_tangent_disps_list, self._mesh_roll_disps_list
         ):
+            lv = body.linear_velocity
+            av = body.angular_velocity
+            sv = body.surface_velocity
+            og = body.origin
             wp.launch(
                 compute_mesh_forces_kernel,
                 dim=N,
@@ -1292,10 +1756,13 @@ class Simulation:
                     self.forces, self.torques,
                     tang, roll,
                     self.radii, self.particle_masses,
-                    mesh.id,
+                    body.mesh.id,
                     self.derived_params,
                     mu_s, mu_d, mu_r, dt,
-                    wp.vec3(surf_vel[0], surf_vel[1], surf_vel[2]),
+                    wp.vec3(sv[0], sv[1], sv[2]),
+                    wp.vec3(lv[0], lv[1], lv[2]),
+                    wp.vec3(av[0], av[1], av[2]),
+                    wp.vec3(float(og[0]), float(og[1]), float(og[2])),
                 ],
                 device=self.device,
             )
