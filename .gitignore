@@ -214,3 +214,14 @@ __marimo__/
 examples/**/psd_hopper_discharge.json
 examples/**/psd_hopper_discharge.html
 examples/**/psd_hopper_discharge.gif
+
+# Generated simulation outputs from kinematic-geometry examples
+# (regenerable from the example scripts)
+examples/conveyor/conveyor.json
+examples/rotating_drum/rotating_drum.json
+examples/translating_floor/translating_floor.json
+
+# Big-drum benchmark outputs (HTML viewers + JSON frame data are large)
+examples/big_drum/big_drum_*.json
+examples/big_drum/big_drum_*.html
+examples/big_drum/big_drum_*.log
